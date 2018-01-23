@@ -3,11 +3,17 @@ package main
 import (
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"os"
 
+	"github.com/BurntSushi/toml"
 	"gopkg.in/fsnotify.v1"
 )
+
+type Config struct {
+	TargetFolders []string
+}
 
 /*
    指定されたフォルダ内のファイルを監視する
@@ -27,67 +33,46 @@ func checkUpdate(fileName string) {
 	// このファイル名に対して、ファイルの直上のフォルダに関してのrecordpathがなければ作る。
 	// うーん、監視フォルダ名を持っておいて、それを上部に含んでいたら、とかの方がいいか。
 	targetPath := "target"
+	fmt.Println("targetPath:", targetPath)
 
 	// os.Stat()
 }
 
 func main() {
-	// 特定のフォルダのファイルを取得する
-	targetFolderPath := "target"
-
 	// 手元にrecordフォルダを生成する
 
 	// settings.txtを作ればいいか。あれば、そこから設定を読み込む。
-	settingsInfo, err := os.Stat("settings.txt")
-	if err == os.ErrNotExist {
-		// file, _ := os.Create("settings.txt")
-
-		// file.
-	} else if err != nil {
-		return
+	_, err := os.Stat("settings.toml")
+	if err != nil {
+		// create file anyway.
+		_, err := os.Create("settings.toml")
+		CheckError(err)
 	}
 
-	fmt.Println("settings:", settingsInfo.)
+	settings, err := ioutil.ReadFile("settings.toml")
 
 	// settings file is generated or exists.
+	var conf Config
+	if _, err := toml.Decode(string(settings), &conf); err != nil {
+		// handle error
+		CheckError(err)
+	}
 
+	// logging.
 	logPath := "log.txt"
 
 	// log
 	file, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 	CheckError(err)
 
-	// stdoutとファイル両方に書き出す
+	// ログをstdoutとファイル両方に書き出す(最終的にdaemonとかにしたいね。)
 	multiWrite := io.MultiWriter(file, os.Stdout)
 	logger := log.New(multiWrite, "tsuke:", log.Ldate|log.Ltime|log.Lshortfile)
-
-	logger.Println("eventing0.")
-
-	// // ファイルパスに対して中身を取得する。うーん、変更検知のターゲットとして
-	// filepath.Walk(
-	// 	targetFolderPath,
-	// 	func(path string, info os.FileInfo, err error) error {
-	// 		if err != nil {
-	// 			logger.Println("failed to traverse.", err)
-	// 			return nil
-	// 		}
-
-	// 		// ディレクトリは無視する？それともずっと追うか？ 副産物とかもあるから追いそう。
-	// 		if info.IsDir() {
-	// 			return nil
-	// 		}
-
-	// 		// // 指定されている場合拡張子を見る？まあいいや。
-	// 		// ext := strings.ToLower(filepath.Ext(info.Name()))
-	// 		logger.Println("file:", info.Name())
-	// 		return nil
-	// 	})
 
 	watcher, err := fsnotify.NewWatcher()
 	CheckError(err)
 
 	defer watcher.Close()
-	logger.Println("eventing1.")
 
 	done := make(chan bool)
 	go func() {
@@ -108,10 +93,18 @@ func main() {
 	}()
 
 	// 監視対象のフォルダを指定する。
-	err2 := watcher.Add(targetFolderPath)
+	for _, targetFolderPath := range conf.TargetFolders {
+		err2 := watcher.Add(targetFolderPath)
+		CheckError(err2)
+	}
 
-	CheckError(err2)
 	<-done
 
 	logger.Println("eventing2.")
 }
+
+// ReadDir(dirname string) ([]os.FileInfo, error) フォルダの中のファイル一覧を取得する
+// files, _ := ioutil.ReadDir("/tmp")
+// for _, file := range files {
+//     fmt.Println(file.Name())
+// }
