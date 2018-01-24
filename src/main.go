@@ -33,16 +33,8 @@ func CheckError(err error) {
 	}
 }
 
-func CopyAllInto(locatePath string) {
+func CopyAllInto(locatePath string, newRecordPath string) {
 	fmt.Println("locatePath:", locatePath)
-
-	// タイムスタンプからフォルダパスを生成
-	formatted := time.Now().Format(layout)
-	locateTargetPath := strings.Replace(locatePath, "/", "_", -1)
-
-	// 新規フォルダを生成
-	newRecordPath := filepath.Join("records", locateTargetPath, formatted)
-	os.Mkdir(newRecordPath, 0700)
 
 	// copyする。
 	CopyRecursive(locatePath, newRecordPath)
@@ -164,6 +156,7 @@ func main() {
 			return
 		}
 
+		fmt.Println("newOrUpdatedFilePath:", newOrUpdatedFilePath)
 		absPath, _ := filepath.Abs(newOrUpdatedFilePath)
 		// targetFullPathsに含まれているかどうかをチェックして、含まれていれば監視対象なので、フォルダを確認、保存する。
 		for _, targetPath := range targetFullPaths {
@@ -186,8 +179,16 @@ func main() {
 				// create.
 				os.MkdirAll(filepath.Join("records", locatePath), 0700)
 
+				// タイムスタンプからフォルダパスを生成
+				formatted := time.Now().Format(layout)
+				locateTargetPath := strings.Replace(locatePath, "/", "_", -1)
+
+				// 新規フォルダを生成
+				newRecordPath := filepath.Join("records", locateTargetPath, formatted)
+				os.Mkdir(newRecordPath, 0700)
+
 				// 既存のファイルが存在するフォルダの中身を丸っとコピー
-				CopyAllInto(targetPath)
+				CopyAllInto(targetPath, newRecordPath)
 				continue
 			}
 
@@ -200,6 +201,7 @@ func main() {
 				}
 				compareTargets = append(compareTargets, recordInfo.Name())
 			}
+			fmt.Println("newOrUpdatedFilePath2:", newOrUpdatedFilePath)
 
 			if len(compareTargets) <= 0 {
 				continue
@@ -214,8 +216,6 @@ func main() {
 				if err != nil {
 					fmt.Println("add err:", err)
 				}
-			} else { // 対象はファイルなのだけれど、
-
 			}
 
 			compareTargetPath := compareTargets[len(compareTargets)-1]
@@ -231,12 +231,38 @@ func main() {
 			duration := currentTime.Sub(recordTime)
 
 			// フォルダがコピーされた場合、この門を突破できない可能性がある。ふーむ、空のフォルダ作られても困るからな、、
-			fmt.Println("incoming", absPath)
+			// それ以外に、フォルダを起点に処理を開始してしまうと、まだ描き途中のファイルを保持できなくなる。
+			// これは致命的で、壊れたコピーになってしまう。で、どうしよう。
+			// これらのファイルが書き込み中かどうかを判定して、書き込み完了したら一気に、という感じにするか。
+
+			/*
+				できると嬉しいのは、トリガーを引いて、数秒の受付時間を儲け、その時間内であればイベントを貯めて、時間切れの瞬間に実行する、というもの。
+
+			*/
+			fmt.Println("incoming", absPath, duration.Hours())
+
 			if duration.Hours() == 0 {
 				continue
 			}
 
-			CopyAllInto(targetPath)
+			copyTargetPath := targetPath
+
+			// フォルダを作成してロックにする。
+			// タイムスタンプからフォルダパスを生成
+			formatted := time.Now().Format(layout)
+			locateTargetPath := strings.Replace(locatePath, "/", "_", -1)
+
+			// 新規フォルダを生成
+			newRecordPath := filepath.Join("records", locateTargetPath, formatted)
+			os.Mkdir(newRecordPath, 0700)
+
+			// このイベントを1回だけ、数秒後に行う。
+			go func() {
+				time.Sleep(3 * time.Second)
+				CopyAllInto(copyTargetPath, newRecordPath)
+			}()
+
+			break
 		}
 	}
 
@@ -284,7 +310,7 @@ func main() {
 	<-done
 }
 
-// ReadDir(dirname string) ([]os.FileInfo, error) フォルダの中のファイル一覧を取得する
+// ReadDir(dirname string) ([]os.FileInfo, error) フォルダの中のファイル一覧��取得する
 // files, _ := ioutil.ReadDir("/tmp")
 // for _, file := range files {
 //     fmt.Println(file.Name())
