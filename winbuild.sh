@@ -1,1 +1,1 @@
-GOOS=windows GOARCH=386 go build -o bin/tsuke ./src/*
+GOOS=windows GOARCH=386 go build -o bin/tsuke.exe ./src/*
