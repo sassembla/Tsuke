@@ -17,7 +17,7 @@ import (
 // YYYY_MM_DD_HH
 const layout = "2006_01_02_15"
 
-type Config struct {
+type config struct {
 	TargetFolders []string
 }
 
@@ -26,22 +26,22 @@ type Config struct {
    監視しているファイルが新しくなっていたら、手元へとコピーする。
 */
 
-func CheckError(err error) {
+func checkError(err error) {
 	if err != nil {
 		fmt.Println("Error: ", err)
 		os.Exit(0)
 	}
 }
 
-func CopyAllInto(locatePath string, newRecordPath string) {
-	fmt.Println("locatePath:", locatePath)
-
-	// copyする。
-	CopyRecursive(locatePath, newRecordPath)
+func copyAllInto(locatePath string, newRecordPath string) {
+	go func() {
+		time.Sleep(5 * time.Second)
+		// ここでファイルのライティングチェックを行えれば、再度自分を呼び出すことで遅延できる。
+		copyRecursive(locatePath, newRecordPath)
+	}()
 }
 
-func CopyRecursive(from, to string) {
-	fmt.Println("from:", from, "to:", to)
+func copyRecursive(from, to string) {
 	_, err := os.Stat(to)
 	if err != nil {
 		os.MkdirAll(to, 0700)
@@ -52,18 +52,18 @@ func CopyRecursive(from, to string) {
 	for _, path := range paths {
 		if path.IsDir() {
 			folderName := filepath.Base(path.Name())
-			CopyRecursive(filepath.Join(from, path.Name()), filepath.Join(to, folderName))
+			copyRecursive(filepath.Join(from, path.Name()), filepath.Join(to, folderName))
 			continue
 		}
 
 		// path is file path. copy from to.
 		fileName := filepath.Base(path.Name())
 		fullPath := filepath.Join(from, path.Name())
-		CopyFile(fullPath, filepath.Join(to, fileName))
+		copyFile(fullPath, filepath.Join(to, fileName))
 	}
 }
 
-func CopyFile(from, to string) {
+func copyFile(from, to string) {
 	in, err := os.Open(from)
 	if err != nil {
 		fmt.Println("open", err)
@@ -93,6 +93,24 @@ func CopyFile(from, to string) {
 	err = out.Sync()
 }
 
+func addFirstRecord(locatePath string, targetPath string) {
+	// create.
+	os.MkdirAll(filepath.Join("records", locatePath), 0700)
+
+	// タイムスタンプからフォルダパスを生成
+	formatted := time.Now().Format(layout)
+	locateTargetPath := strings.Replace(locatePath, "/", "_", -1)
+	locateTargetPath = strings.Replace(locateTargetPath, "\\", "_", -1)
+	locateTargetPath = strings.Replace(locateTargetPath, ":", "_", -1)
+
+	// 新規フォルダを生成
+	newRecordPath := filepath.Join("records", locateTargetPath, formatted)
+	os.Mkdir(newRecordPath, 0700)
+
+	// 既存のファイルが存在するフォルダの中身を丸っとコピー
+	copyAllInto(targetPath, newRecordPath)
+}
+
 func main() {
 	// 手元にrecordフォルダを生成する
 
@@ -101,16 +119,16 @@ func main() {
 	if err != nil {
 		// create file anyway.
 		_, err := os.Create("settings.toml")
-		CheckError(err)
+		checkError(err)
 	}
 
 	settings, err := ioutil.ReadFile("settings.toml")
 
 	// settings file is generated or exists.
-	var conf Config
+	var conf config
 	if _, err := toml.Decode(string(settings), &conf); err != nil {
 		// handle error
-		CheckError(err)
+		checkError(err)
 	}
 
 	var targetFullPaths []string
@@ -135,14 +153,14 @@ func main() {
 
 	// log
 	file, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
-	CheckError(err)
+	checkError(err)
 
 	// ログをstdoutとファイル両方に書き出す(最終的にdaemonとかにしたいね。)
 	multiWrite := io.MultiWriter(file, os.Stdout)
 	logger := log.New(multiWrite, "tsuke:", log.Ldate|log.Ltime|log.Lshortfile)
 
 	watcher, err := fsnotify.NewWatcher()
-	CheckError(err)
+	checkError(err)
 
 	defer watcher.Close()
 
@@ -156,15 +174,16 @@ func main() {
 			return
 		}
 
-		fmt.Println("newOrUpdatedFilePath:", newOrUpdatedFilePath)
 		absPath, _ := filepath.Abs(newOrUpdatedFilePath)
 		// targetFullPathsに含まれているかどうかをチェックして、含まれていれば監視対象なので、フォルダを確認、保存する。
 		for _, targetPath := range targetFullPaths {
 
 			if !strings.HasPrefix(absPath, targetPath) {
-				// not target.
+				// not target. move next.
 				continue
 			}
+
+			// targetパスの内部の要素なのが確定
 
 			// path is under target path.
 
@@ -174,22 +193,10 @@ func main() {
 
 			_, err := os.Stat(recordPath)
 
-			// 対象のtargetフォルダが見つからなかった=新規保存
+			// 対象のtargetフォルダが見つからなかった = 新規保存
 			if err != nil {
-				// create.
-				os.MkdirAll(filepath.Join("records", locatePath), 0700)
-
-				// タイムスタンプからフォルダパスを生成
-				formatted := time.Now().Format(layout)
-				locateTargetPath := strings.Replace(locatePath, "/", "_", -1)
-
-				// 新規フォルダを生成
-				newRecordPath := filepath.Join("records", locateTargetPath, formatted)
-				os.Mkdir(newRecordPath, 0700)
-
-				// 既存のファイルが存在するフォルダの中身を丸っとコピー
-				CopyAllInto(targetPath, newRecordPath)
-				continue
+				addFirstRecord(locatePath, targetPath)
+				break
 			}
 
 			// records/アイテムのフォルダは生成されているので、あとは日付フォルダの一覧を取得して、時間変換したら規定時間が過ぎている場合、コピー
@@ -201,13 +208,6 @@ func main() {
 				}
 				compareTargets = append(compareTargets, recordInfo.Name())
 			}
-			fmt.Println("newOrUpdatedFilePath2:", newOrUpdatedFilePath)
-
-			if len(compareTargets) <= 0 {
-				continue
-			}
-
-			// targetパスの内部の要素なのが確定
 
 			// このpathがディレクトリの場合、このディレクトリ自体も監視対象にいれないといけない。
 			data, _ := os.Stat(absPath)
@@ -216,6 +216,12 @@ func main() {
 				if err != nil {
 					fmt.Println("add err:", err)
 				}
+			}
+
+			if len(compareTargets) == 0 {
+				// まだレコードがないので、新規作成。
+				addFirstRecord(locatePath, targetPath)
+				break
 			}
 
 			compareTargetPath := compareTargets[len(compareTargets)-1]
@@ -230,19 +236,8 @@ func main() {
 			// check distance of record.
 			duration := currentTime.Sub(recordTime)
 
-			// フォルダがコピーされた場合、この門を突破できない可能性がある。ふーむ、空のフォルダ作られても困るからな、、
-			// それ以外に、フォルダを起点に処理を開始してしまうと、まだ描き途中のファイルを保持できなくなる。
-			// これは致命的で、壊れたコピーになってしまう。で、どうしよう。
-			// これらのファイルが書き込み中かどうかを判定して、書き込み完了したら一気に、という感じにするか。
-
-			/*
-				できると嬉しいのは、トリガーを引いて、数秒の受付時間を儲け、その時間内であればイベントを貯めて、時間切れの瞬間に実行する、というもの。
-
-			*/
-			fmt.Println("incoming", absPath, duration.Hours())
-
 			if duration.Hours() == 0 {
-				continue
+				break
 			}
 
 			copyTargetPath := targetPath
@@ -256,12 +251,7 @@ func main() {
 			newRecordPath := filepath.Join("records", locateTargetPath, formatted)
 			os.Mkdir(newRecordPath, 0700)
 
-			// このイベントを1回だけ、数秒後に行う。
-			go func() {
-				time.Sleep(3 * time.Second)
-				CopyAllInto(copyTargetPath, newRecordPath)
-			}()
-
+			copyAllInto(copyTargetPath, newRecordPath)
 			break
 		}
 	}
@@ -301,16 +291,16 @@ func main() {
 		}
 	}()
 
-	// 監視対象のフォルダをrecursiveに指定する。
+	// 監視対象のフォルダ���recursive���指定する。
 	for _, targetFolderPath := range conf.TargetFolders {
 		err2 := watcher.Add(targetFolderPath)
-		CheckError(err2)
+		checkError(err2)
 	}
 
 	<-done
 }
 
-// ReadDir(dirname string) ([]os.FileInfo, error) フォルダの中のファイル一覧��取得する
+// ReadDir(dirname string) ([]os.FileInfo, error) フ�����ルダの中のファイル一覧��取得する
 // files, _ := ioutil.ReadDir("/tmp")
 // for _, file := range files {
 //     fmt.Println(file.Name())
