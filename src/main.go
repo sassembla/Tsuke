@@ -34,11 +34,14 @@ func CheckError(err error) {
 }
 
 func CopyAllInto(locatePath string) {
+	fmt.Println("locatePath:", locatePath)
+
 	// タイムスタンプからフォルダパスを生成
 	formatted := time.Now().Format(layout)
+	locateTargetPath := strings.Replace(locatePath, "/", "_", -1)
 
 	// 新規フォルダを生成
-	newRecordPath := filepath.Join("records", locatePath, formatted)
+	newRecordPath := filepath.Join("records", locateTargetPath, formatted)
 	os.Mkdir(newRecordPath, 0700)
 
 	// copyする。
@@ -46,53 +49,56 @@ func CopyAllInto(locatePath string) {
 }
 
 func CopyRecursive(from, to string) {
-	fmt.Println(from, to)
-	// _, err := os.Stat(to)
-	// if err != nil {
-	// 	os.MkdirAll(to, 0700)
-	// }
+	fmt.Println("from:", from, "to:", to)
+	_, err := os.Stat(to)
+	if err != nil {
+		os.MkdirAll(to, 0700)
+	}
 
-	// paths, _ := ioutil.ReadDir(from)
+	paths, _ := ioutil.ReadDir(from)
 
-	// for _, path := range paths {
-	// 	if path.IsDir() {
-	// 		folderName := filepath.Base(path.Name())
-	// 		CopyRecursive(path.Name(), filepath.Join(to, folderName))
-	// 		continue
-	// 	}
+	for _, path := range paths {
+		if path.IsDir() {
+			folderName := filepath.Base(path.Name())
+			CopyRecursive(filepath.Join(from, path.Name()), filepath.Join(to, folderName))
+			continue
+		}
 
-	// 	// path is file path. copy from to.
-	// 	fileName := filepath.Base(path.Name())
-	// 	CopyFile(path.Name(), filepath.Join(to, fileName))
-	// }
+		// path is file path. copy from to.
+		fileName := filepath.Base(path.Name())
+		fullPath := filepath.Join(from, path.Name())
+		CopyFile(fullPath, filepath.Join(to, fileName))
+	}
 }
 
 func CopyFile(from, to string) {
-	fmt.Println(from, to)
-	// in, err := os.Open(from)
-	// if err != nil {
-	// 	return
-	// }
-	// defer in.Close()
+	in, err := os.Open(from)
+	if err != nil {
+		fmt.Println("open", err)
+		return
+	}
+	defer in.Close()
 
-	// out, err := os.Create(to)
-	// if err != nil {
-	// 	return
-	// }
+	out, err := os.Create(to)
+	if err != nil {
+		fmt.Println("out", err)
+		return
+	}
 
-	// defer func() {
-	// 	cerr := out.Close()
-	// 	if err == nil {
-	// 		err = cerr
-	// 	}
-	// }()
-	// _, err = io.Copy(out, in)
+	defer func() {
+		cerr := out.Close()
+		if err == nil {
+			err = cerr
+		}
+	}()
+	_, err = io.Copy(out, in)
 
-	// if err != nil {
-	// 	return
-	// }
+	if err != nil {
+		fmt.Println("copy", err)
+		return
+	}
 
-	// err = out.Sync()
+	err = out.Sync()
 }
 
 func main() {
@@ -132,8 +138,32 @@ func main() {
 		targetFullPaths = append(targetFullPaths, targetCandidatePath)
 	}
 
-	// アップデート関数、ファイル関連のイベント検知時に使用する。
+	// logging.
+	logPath := "log.txt"
+
+	// log
+	file, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	CheckError(err)
+
+	// ログをstdoutとファイル両方に書き出す(最終的にdaemonとかにしたいね。)
+	multiWrite := io.MultiWriter(file, os.Stdout)
+	logger := log.New(multiWrite, "tsuke:", log.Ldate|log.Ltime|log.Lshortfile)
+
+	watcher, err := fsnotify.NewWatcher()
+	CheckError(err)
+
+	defer watcher.Close()
+
+	/*
+		ファイルイベント発生時に動かす関数。
+		dirが入ってきた場合、監視対象に追加する必要がある。
+	*/
 	checkUpdate := func(newOrUpdatedFilePath string) {
+		// .始まりのファイルなら拒否
+		if strings.HasPrefix(filepath.Base(newOrUpdatedFilePath), ".") {
+			return
+		}
+
 		absPath, _ := filepath.Abs(newOrUpdatedFilePath)
 		// targetFullPathsに含まれているかどうかをチェックして、含まれていれば監視対象なので、フォルダを確認、保存する。
 		for _, targetPath := range targetFullPaths {
@@ -150,6 +180,8 @@ func main() {
 			recordPath := filepath.Join("records", locatePath)
 
 			_, err := os.Stat(recordPath)
+
+			// 対象のtargetフォルダが見つからなかった=新規保存
 			if err != nil {
 				// create.
 				os.MkdirAll(filepath.Join("records", locatePath), 0700)
@@ -173,6 +205,19 @@ func main() {
 				continue
 			}
 
+			// targetパスの内部の要素なのが確定
+
+			// このpathがディレクトリの場合、このディレクトリ自体も監視対象にいれないといけない。
+			data, _ := os.Stat(absPath)
+			if data.IsDir() {
+				err := watcher.Add(absPath)
+				if err != nil {
+					fmt.Println("add err:", err)
+				}
+			} else { // 対象はファイルなのだけれど、
+
+			}
+
 			compareTargetPath := compareTargets[len(compareTargets)-1]
 			compareTargetTimeSource := filepath.SplitList(compareTargetPath)
 			compareTargetTime := compareTargetTimeSource[len(compareTargetTimeSource)-1]
@@ -182,9 +227,11 @@ func main() {
 			current := time.Now().Format(layout)
 			currentTime, _ := time.Parse(layout, current)
 
-			// beyond
+			// check distance of record.
 			duration := currentTime.Sub(recordTime)
 
+			// フォルダがコピーされた場合、この門を突破できない可能性がある。ふーむ、空のフォルダ作られても困るからな、、
+			fmt.Println("incoming", absPath)
 			if duration.Hours() == 0 {
 				continue
 			}
@@ -193,21 +240,17 @@ func main() {
 		}
 	}
 
-	// logging.
-	logPath := "log.txt"
+	checkDelete := func(newOrUpdatedFilePath string) {
+		absPath, _ := filepath.Abs(newOrUpdatedFilePath)
 
-	// log
-	file, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
-	CheckError(err)
-
-	// ログをstdoutとファイル両方に書き出す(最終的にdaemonとかにしたいね。)
-	multiWrite := io.MultiWriter(file, os.Stdout)
-	logger := log.New(multiWrite, "tsuke:", log.Ldate|log.Ltime|log.Lshortfile)
-
-	watcher, err := fsnotify.NewWatcher()
-	CheckError(err)
-
-	defer watcher.Close()
+		data, _ := os.Stat(absPath)
+		if data.IsDir() {
+			watcher.Remove(absPath)
+			if err != nil {
+				fmt.Println("remove err:", err)
+			}
+		}
+	}
 
 	done := make(chan bool)
 	go func() {
@@ -219,6 +262,11 @@ func main() {
 					continue
 				}
 
+				if event.Op&fsnotify.Create == fsnotify.Remove {
+					checkDelete(event.Name)
+					continue
+				}
+
 				// logger.Println("other event:", event.Name, event.Op)
 
 			case err := <-watcher.Errors:
@@ -227,7 +275,7 @@ func main() {
 		}
 	}()
 
-	// 監視対象のフォルダを指定する。
+	// 監視対象のフォルダをrecursiveに指定する。
 	for _, targetFolderPath := range conf.TargetFolders {
 		err2 := watcher.Add(targetFolderPath)
 		CheckError(err2)
